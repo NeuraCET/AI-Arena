@@ -32,7 +32,7 @@ export default function Qwen() {
   return (
     <div className="min-h-screen bg-[#121212] relative overflow-hidden font-sans text-white">
       {/* Header gap simulation */}
-      <div className="h-20 flex items-center justify-center text-gold-gradient text-sm bg-black/50"
+      <div className="h-20 flex items-center justify-center text-gold-gradient text-4xl tracking-widest bg-black/50"
           style={{ fontFamily: 'Bietro' }}>
         QWEN
       </div>

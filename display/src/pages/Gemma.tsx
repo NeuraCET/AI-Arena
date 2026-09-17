@@ -32,7 +32,7 @@ export default function Gemma() {
   return (
     <div className="min-h-screen bg-white relative overflow-hidden font-sans text-black">
       {/* Header gap simulation */}
-      <div className="h-20 flex items-center justify-center text-black text-sm bg-gray-50"   
+      <div className="h-20 flex items-center justify-center text-black text-4xl tracking-widest bg-gray-50"   
             style={{ fontFamily: 'Bietro' }}>
         GEMMA
       </div>
