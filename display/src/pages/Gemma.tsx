@@ -1,10 +1,18 @@
 import React, { useState, useEffect } from 'react';
-
-const mockText = "This is a streamed mock response from the Gemma model. It demonstrates the text streaming capability after the animation finishes. Here we can imagine the AI generating a thoughtful, detailed response to the user's prompt in real-time, token by token.";
+import { LLMMessage } from '../components/LLMMessage';
+import { useWebSocketConnection } from '../hooks/useWebSocket';
 
 export default function Gemma() {
   const [phase, setPhase] = useState<'listening' | 'animating' | 'streaming'>('listening');
-  const [displayedText, setDisplayedText] = useState('');
+  const wsUrl = `ws://${window.location.hostname}:8080`;
+  const { message } = useWebSocketConnection(wsUrl);
+
+  useEffect(() => {
+    // When a message is received, trigger the animation phase
+    if (message && phase === 'listening') {
+      setPhase('animating');
+    }
+  }, [message, phase]);
 
   useEffect(() => {
     if (phase === 'animating') {
@@ -15,24 +23,23 @@ export default function Gemma() {
     }
   }, [phase]);
 
-  useEffect(() => {
-    if (phase === 'streaming') {
-      let i = 0;
-      const interval = setInterval(() => {
-        setDisplayedText(mockText.slice(0, i));
-        i++;
-        if (i > mockText.length) {
-          clearInterval(interval);
-        }
-      }, 20);
-      return () => clearInterval(interval);
+  // Extract content from message
+  const getContent = () => {
+    if (!message) return '';
+    try {
+      const parsed = JSON.parse(message);
+      return parsed.content || parsed.text || parsed.data || message;
+    } catch (e) {
+      return message;
     }
-  }, [phase]);
+  };
+
+  const content = getContent();
 
   return (
     <div className="min-h-screen bg-white relative overflow-hidden font-sans text-black">
       {/* Header gap simulation */}
-      <div className="h-20 flex items-center justify-center text-black text-sm bg-gray-50"   
+      <div className="h-20 flex items-center justify-center text-black text-4xl tracking-widest bg-gray-50"   
             style={{ fontFamily: 'Bietro' }}>
         GEMMA
       </div>
@@ -43,8 +50,8 @@ export default function Gemma() {
         {/* Streaming text area box */}
         <div className={`transition-opacity duration-1000 ease-in-out w-full max-w-4xl h-full max-h-[70vh] p-12 flex items-center justify-center mt-8 ml-16 relative ${phase === 'streaming' ? 'opacity-100' : 'opacity-0'}`}>
           {phase === 'streaming' ? (
-             <div className="text-gray-800 text-lg w-full h-full text-center">
-               {displayedText}
+             <div className="w-full h-full text-left overflow-auto">
+               <LLMMessage content={content} fontSize="text-lg" animate={true} speed={20} />
              </div>
           ) : (
              <div className="text-gray-400">text streamed here</div>
