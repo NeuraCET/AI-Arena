@@ -1,4 +1,6 @@
 ollama
-kokoro==0.9.4
+httpx
+chatterbox-tts==0.1.7
+setuptools==80.9.0
 numpy
 sounddevice

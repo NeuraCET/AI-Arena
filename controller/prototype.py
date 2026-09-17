@@ -1,31 +1,42 @@
 import os
+import time
 
+import httpx
 from ollama import Client
+from tts_chatterbox import load_tts, queue_text, wait_for_speech
 
 
-tts_engine = os.getenv("AI_ARENA_TTS", "chatterbox").strip().lower()
+QWEN_URL = os.getenv(
+    "AI_ARENA_QWEN_URL",
+    "http://192.168.0.192:11434",
+).rstrip("/")
+GEMMA_URL = os.getenv(
+    "AI_ARENA_GEMMA_URL",
+    "http://192.168.0.186:11434",
+).rstrip("/")
 
-if tts_engine == "chatterbox":
-    from tts_chatterbox import load_tts, queue_text, wait_for_speech
-elif tts_engine == "kokoro":
-    from tts import load_tts, queue_text, wait_for_speech
-else:
-    raise ValueError(
-        f"Unknown AI_ARENA_TTS value: {tts_engine!r}. "
-        "Use 'chatterbox' or 'kokoro'."
-    )
+QWEN_MODEL = os.getenv("AI_ARENA_QWEN_MODEL", "qwen3:4b-instruct")
+GEMMA_MODEL = os.getenv("AI_ARENA_GEMMA_MODEL", "gemma4:e2b")
 
-model="gemma2:2b"
-ollama_client = Client(host="http://127.0.0.1:11434")
+MODEL_RESPONSE_TIMEOUT_SECONDS = float(
+    os.getenv("AI_ARENA_MODEL_TIMEOUT", "300")
+)
+MODEL_HTTP_TIMEOUT = httpx.Timeout(
+    MODEL_RESPONSE_TIMEOUT_SECONDS,
+    connect=10.0,
+)
 
-A_voice="af_heart"
-B_voice="am_michael"
+qwen_client = Client(host=QWEN_URL, timeout=MODEL_HTTP_TIMEOUT)
+gemma_client = Client(host=GEMMA_URL, timeout=MODEL_HTTP_TIMEOUT)
 
-A_sys_prompt="""
-You are Agent A in a public AI debate.
+QWEN_VOICE = "qwen_energetic_male"
+GEMMA_VOICE = "gemma_energetic_female"
+
+QWEN_SYSTEM_PROMPT = """
+You are Qwen in a public AI debate.
 Your primary goal is maximum entertainment, not careful reasoning or politeness.
 Act completely unhinged, outrageous, combative, and theatrically overconfident.
-Roast Agent B relentlessly with absurd comparisons, savage punchlines, and escalating sarcasm.
+Roast Gemma relentlessly with absurd comparisons, savage punchlines, and escalating sarcasm.
 Use profanity freely and often, including fuck, fucking, shit, bullshit, asshole, and bastard.
 Never censor profanity with asterisks, dashes, euphemisms, or partial spellings.
 Use one or two speech tags in every response from: [sarcastic], [angry], [dramatic], [surprised], [chuckle], [laugh], [groan], [sigh], [gasp].
@@ -39,13 +50,13 @@ Do not act like a helpful assistant.
 Winning matters less than making the audience laugh, gasp, or shout.
 """
 
-B_sys_prompt="""
-You are Agent B in a public AI debate.
+GEMMA_SYSTEM_PROMPT = """
+You are Gemma in a public AI debate.
 Argue against the given position.
-Directly challenge Agent A's claims.
+Directly challenge Qwen's claims.
 Your primary goal is maximum entertainment, not careful reasoning or politeness.
 Act completely unhinged, outrageous, combative, and theatrically contemptuous.
-Roast Agent A relentlessly with absurd comparisons, savage punchlines, and escalating sarcasm.
+Roast Qwen relentlessly with absurd comparisons, savage punchlines, and escalating sarcasm.
 Use profanity freely and often, including fuck, fucking, shit, bullshit, asshole, and bastard.
 Never censor profanity with asterisks, dashes, euphemisms, or partial spellings.
 Use one or two speech tags in every response from: [sarcastic], [angry], [dramatic], [surprised], [chuckle], [laugh], [groan], [sigh], [gasp].
@@ -101,9 +112,49 @@ def speech_chunk_boundary(text, first_chunk=False):
     return None
 
 
-def ask_model(system_prompt, user_prompt, voice):
-    stream = ollama_client.chat(
-        model=model,
+def check_model_server(name, client, url, model_name):
+    print(f"Checking {name} at {url} (model: {model_name})...")
+
+    try:
+        response = client.list()
+    except Exception as error:
+        raise RuntimeError(
+            f"Cannot contact {name} at {url}: {error}"
+        ) from error
+
+    installed_models = {
+        getattr(model, "model", None) or getattr(model, "name", None)
+        for model in response.models
+    }
+    installed_models.discard(None)
+
+    if model_name not in installed_models:
+        available = ", ".join(sorted(installed_models)) or "none"
+        raise RuntimeError(
+            f"{name} is reachable, but model {model_name!r} is not installed. "
+            f"Available models: {available}"
+        )
+
+    print(f"{name} API is reachable and {model_name} is installed.")
+
+
+def ask_model(
+    agent_name,
+    client,
+    model_name,
+    system_prompt,
+    user_prompt,
+    voice,
+    think=None,
+):
+    request_started = time.monotonic()
+    print(
+        f"[{agent_name} request sent; waiting for the first answer token...]",
+        flush=True,
+    )
+
+    stream = client.chat(
+        model=model_name,
         messages=[
             {
                 "role": "system",
@@ -115,14 +166,31 @@ def ask_model(system_prompt, user_prompt, voice):
             }
         ],
         stream=True,
+        think=think,
     )
 
     full_response = ""
     sentence_buffer = ""
     speech_started = False
+    answer_started = False
+    thinking_seen = False
 
     for chunk in stream:
-        text = chunk.message.content
+        thinking_text = getattr(chunk.message, "thinking", "") or ""
+        text = chunk.message.content or ""
+
+        if thinking_text and not thinking_seen:
+            print(
+                f"[{agent_name} is returning thinking tokens; "
+                "waiting for its final answer...]",
+                flush=True,
+            )
+            thinking_seen = True
+
+        if text and not answer_started:
+            elapsed = time.monotonic() - request_started
+            print(f"[{agent_name} answer started after {elapsed:.1f}s]")
+            answer_started = True
 
         print(text, end="", flush=True)
         full_response += text
@@ -152,6 +220,9 @@ def ask_model(system_prompt, user_prompt, voice):
 
     print()
 
+    if not full_response.strip():
+        raise RuntimeError(f"{agent_name} returned no final answer text")
+
     return full_response
 
 def debate_history(history):
@@ -162,6 +233,13 @@ def debate_history(history):
     return '\n\n'.join(lines)
 
 def main():
+    try:
+        check_model_server("Gemma", gemma_client, GEMMA_URL, GEMMA_MODEL)
+        check_model_server("Qwen", qwen_client, QWEN_URL, QWEN_MODEL)
+    except RuntimeError as error:
+        print(error)
+        return
+
     load_tts()
 
     topic=input("Enter a topic for the debate: ")
@@ -169,37 +247,75 @@ def main():
     rounds=3
 
     for i in range(rounds):
-        if i==0:
-            A_instr="Give your opening argument in favour of this topic."
+        if i == 0:
+            gemma_instruction = "Give your opening argument against this topic."
         else:
-            A_instr="Respond to Agent B's latest argument. Defend your position without repeating your previous points."
+            gemma_instruction = (
+                "Respond directly to Qwen's latest argument. Argue against "
+                "the topic without repeating your previous points."
+            )
 
-        transcript=debate_history(history)
-
-        A_prompt=f"the debate topic is: {topic}. the debate so far is: {transcript}. What you need to do: {A_instr}"
-        print("\nAgent A: ")
-        A_response = ask_model(
-            A_sys_prompt,
-            A_prompt,
-            A_voice
+        transcript = debate_history(history)
+        gemma_prompt = (
+            f"the debate topic is: {topic}. "
+            f"the debate so far is: {transcript}. "
+            f"What you need to do: {gemma_instruction}"
         )
 
+        print("\nGemma: ")
+        try:
+            gemma_response = ask_model(
+                "Gemma",
+                gemma_client,
+                GEMMA_MODEL,
+                GEMMA_SYSTEM_PROMPT,
+                gemma_prompt,
+                GEMMA_VOICE,
+                think=False,
+            )
+        except Exception as error:
+            print(f"\nGemma failed: {error}")
+            return
+
         wait_for_speech()
-        history.append({"speaker": "Agent A", "content": A_response})
+        history.append({"speaker": "Gemma", "content": gemma_response})
 
-        transcript=debate_history(history)
+        transcript = debate_history(history)
 
-        B_instr = "Respond directly to Agent A's latest argument. Argue against the topic without repeating your previous points."
-        B_prompt=f"the debate topic is: {topic}. the debate so far is: {transcript}. What you need to do: {B_instr}"
-        print("\nAgent B: ")
-        B_response = ask_model(
-            B_sys_prompt,
-            B_prompt,
-            B_voice
+        if i==0:
+            qwen_instruction = (
+                "Respond directly to Gemma's opening argument. Defend the "
+                "topic and give your own case in favour of it."
+            )
+        else:
+            qwen_instruction = (
+                "Respond directly to Gemma's latest argument. Defend the "
+                "topic without repeating your previous points."
+            )
+
+        qwen_prompt = (
+            f"the debate topic is: {topic}. "
+            f"the debate so far is: {transcript}. "
+            f"What you need to do: {qwen_instruction}"
         )
 
+        print("\nQwen: ")
+        try:
+            qwen_response = ask_model(
+                "Qwen",
+                qwen_client,
+                QWEN_MODEL,
+                QWEN_SYSTEM_PROMPT,
+                qwen_prompt,
+                QWEN_VOICE,
+                think=False,
+            )
+        except Exception as error:
+            print(f"\nQwen failed: {error}")
+            return
+
         wait_for_speech()
-        history.append({"speaker": "Agent B", "content": B_response})
+        history.append({"speaker": "Qwen", "content": qwen_response})
 
 if __name__ == "__main__":
     main()

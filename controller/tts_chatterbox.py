@@ -34,6 +34,19 @@ MODEL_FILES = [
     "*.pt",
     "*.model",
 ]
+DEFAULT_VOICE = "default"
+VOICE_REFERENCES = {
+    "gemma_energetic_female": (
+        Path(__file__).resolve().parent
+        / "voices"
+        / "gemma_energetic_female.wav"
+    ),
+    "qwen_energetic_male": (
+        Path(__file__).resolve().parent
+        / "voices"
+        / "qwen_energetic_male.wav"
+    ),
+}
 SUPPORTED_SPEECH_TAGS = {
     "[sarcastic]",
     "[angry]",
@@ -57,6 +70,7 @@ SENTENCE_PAUSE = 0.09
 text_queue = Queue()
 audio_queue = Queue(maxsize=2)
 model = None
+voice_conditions = {}
 worker_started = False
 verbose = os.getenv("AI_ARENA_TTS_VERBOSE", "0") == "1"
 tags_queued_this_turn = 0
@@ -112,9 +126,10 @@ def _pause_after(text):
 
 def _synthesis_worker():
     while True:
-        text, _voice = text_queue.get()
+        text, voice = text_queue.get()
 
         try:
+            model.conds = voice_conditions[voice]
             started = time.perf_counter()
             wav = model.generate(
                 text,
@@ -178,7 +193,7 @@ def _playback_worker():
 
 
 def load_tts():
-    global model, worker_started
+    global model, voice_conditions, worker_started
 
     if model is not None:
         return
@@ -195,13 +210,30 @@ def load_tts():
 
     model = ChatterboxTurboTTS.from_local(snapshot_path, device)
 
-    # Pay the one-time CUDA/kernel startup cost before the live debate begins.
-    model.generate(
-        "Ready.",
-        cfg_weight=0.0,
-        exaggeration=0.0,
-        min_p=0.0,
-    )
+    voice_conditions = {DEFAULT_VOICE: model.conds}
+
+    for voice, reference_path in VOICE_REFERENCES.items():
+        if not reference_path.is_file():
+            raise FileNotFoundError(
+                f"Missing reference audio for {voice!r}: {reference_path}"
+            )
+
+        print(f"Preparing Chatterbox voice: {voice}...")
+        model.prepare_conditionals(str(reference_path))
+        voice_conditions[voice] = model.conds
+
+    # Pay the one-time CUDA/kernel startup cost for both debate voices before
+    # the live debate begins. The unused built-in fallback stays available.
+    for voice in VOICE_REFERENCES:
+        model.conds = voice_conditions[voice]
+        model.generate(
+            "Ready.",
+            cfg_weight=0.0,
+            exaggeration=0.0,
+            min_p=0.0,
+        )
+
+    model.conds = voice_conditions[DEFAULT_VOICE]
 
     if not worker_started:
         Thread(target=_synthesis_worker, daemon=True).start()
@@ -211,11 +243,13 @@ def load_tts():
     print("Chatterbox Turbo is ready.")
 
 
-def queue_text(text, voice=None):
+def queue_text(text, voice=DEFAULT_VOICE):
     global tags_queued_this_turn
 
-    # Turbo currently uses its bundled voice. The voice argument is retained so
-    # the controller can switch between Kokoro and Chatterbox without changes.
+    if voice != DEFAULT_VOICE and voice not in VOICE_REFERENCES:
+        raise ValueError(f"Unknown Chatterbox voice: {voice!r}")
+
+    # Turbo currently uses its bundled voice.
     def keep_supported_tag(match):
         global tags_queued_this_turn
 
